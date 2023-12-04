@@ -1,0 +1,3 @@
+/mnt/fengyuan/object tracking/yolo_ground_truth/build/CMakeFiles/main.dir
+/mnt/fengyuan/object tracking/yolo_ground_truth/build/CMakeFiles/edit_cache.dir
+/mnt/fengyuan/object tracking/yolo_ground_truth/build/CMakeFiles/rebuild_cache.dir
