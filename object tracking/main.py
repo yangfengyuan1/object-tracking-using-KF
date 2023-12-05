@@ -14,11 +14,12 @@ import os
 import cv2
 import numpy as np
 import argparse
+import matplotlib.pyplot as plt
 from utils import *
 
 # 状态初始化
 initial_target_box = [555, 631, 791, 715] # output.avi
-# initial_target_box = [729, 238, 764, 339]  # 目标初始bouding box
+# initial_target_box = [64, 521, 340, 695]  # 目标初始bouding box
 # initial_target_box = [193 ,342 ,250 ,474] # videotest1
 # initial_target_box = [328 ,145 ,350 ,220]
 IOU_Threshold = 0.3 # 匹配时的阈值
@@ -32,8 +33,10 @@ rmse_win_len = 5
 initial_box_state = xyxy_to_xywh(initial_target_box) # xyxy->xywh
 # [中心x,中心y,宽w,高h,dx,dy,dw,dh] ,initial dx=dy=0
 initial_state = np.array([[initial_box_state[0], initial_box_state[1], initial_box_state[2], initial_box_state[3], 0, 0, 0, 0]]).T  
-ground_true = []
-estimations = []
+ground_true = [] # maskrcnn
+estimations = [] # filter
+jiance = []      # yolo
+
 
 # 卡尔曼滤波：假设涉及的运动都是线性运动
 # 状态转移矩阵，上一时刻的状态转移到当前时刻
@@ -72,10 +75,11 @@ R = np.eye(8) * R_xishu
 P = np.eye(8)
 
 # 假设状态转移函数为非线性函数
-# EKF状态转移矩阵
+# EKF状态转移矩阵,状态向量x=[x,y,w,h,dx,dy,ddx,ddy]T
 def ekf_state_transition(X, dt):
-    A_ekf = np.array([[1, 0, 0, 0, dt, 0, 0, 0],
-                      [0, 1, 0, 0, 0, dt, 0, 0],
+    ddt = 0.5 * dt * dt
+    A_ekf = np.array([[1, 0, 0, 0, dt, 0, ddt, 0],
+                      [0, 1, 0, 0, 0, dt, 0, ddt],
                       [0, 0, 1, 0, 0, 0, dt, 0],
                       [0, 0, 0, 1, 0, 0, 0, dt],
                       [0, 0, 0, 0, 1, 0, 0, 0],
@@ -87,20 +91,20 @@ def ekf_state_transition(X, dt):
 # 计算状态向量X关于观测的雅可比矩阵H
 def calculate_jacobian(X):
     # 提取状态向量中的位置和大小信息
-    x, y, w, h, dx, dy, dw, dh = X
+    x, y, w, h, dx, dy, ddx, ddy = X
 
     # 计算雅可比矩阵H
-    # H = np.array([
-    #     [1, 0, 0, 0, 0, 0, 0, 0],  # 对x的偏导数
-    #     [0, 1, 0, 0, 0, 0, 0, 0],  # 对y的偏导数
-    #     [0, 0, 1, 0, 0, 0, 0, 0],  # 对w的偏导数
-    #     [0, 0, 0, 1, 0, 0, 0, 0],  # 对h的偏导数
-    #     [0, 0, 0, 0, 1, 0, 0, 0],  # 对dx的偏导数
-    #     [0, 0, 0, 0, 0, 1, 0, 0],  # 对dy的偏导数
-    #     [0, 0, 0, 0, 0, 0, 1, 0],  # 对dw的偏导数
-    #     [0, 0, 0, 0, 0, 0, 0, 1],  # 对dh的偏导数
-    # ])
-    H = np.eye(8)
+    H = np.array([
+        [1, 0, 0, 0, 0, 0, 0, 0],  # 对x的偏导数
+        [0, 1, 0, 0, 0, 0, 0, 0],  # 对y的偏导数
+        [0, 0, 1, 0, 0, 0, 0, 0],  # 对w的偏导数
+        [0, 0, 0, 1, 0, 0, 0, 0],  # 对h的偏导数
+        [0, 0, 0, 0, 0, 0, 0, 0],  
+        [0, 0, 0, 0, 0, 0, 0, 0],  
+        [0, 0, 0, 0, 0, 0, 0, 0],  
+        [0, 0, 0, 0, 0, 0, 0, 0],  
+    ])
+    # H = np.eye(8)
     return H
 
 # EKF观测函数
@@ -152,6 +156,9 @@ if __name__ == "__main__":
     P_posterior = np.array(P) # 状态估计协方差矩阵P初始化
     Z = np.array(initial_state) # [x,y,w,h,dx,dy]
     trace_list = []  # 用于保存目标box的轨迹
+    rmse_list = [] #用于保存rmse结果
+
+
     while (True):
         # Capture frame-by-frame
         ret, frame = cap.read()
@@ -161,8 +168,8 @@ if __name__ == "__main__":
         plot_one_box(last_box_posterior, frame, color=(255, 255, 255), target=False)
         if not ret:
             break
-        # print(frame_counter)        
-        # 从视觉算法检测结果获取2d bbox信息
+        print("frame num:"+str(frame_counter))        
+        # 从视觉算法检测结果获取2d bbox信息,yolo结果为检测值，maskrcnn结果为groundtruth
         label_file_path = os.path.join(label_path, file_name + "yolo_" + str(frame_counter) + ".txt")
         label_ground_truth_path = os.path.join(label_path, file_name + "_" + str(frame_counter) + ".txt")
         with open(label_file_path, "r") as f:
@@ -184,48 +191,73 @@ if __name__ == "__main__":
                     max_iou_matched = True
 
             if max_iou_matched == True:
-                # 如果找到了最大IOU BOX,则认为该框为观测值
-                # 跟踪目标画成red框
-                plot_one_box(target_box, frame, target=True)
-                xywh = xyxy_to_xywh(target_box)
-                # ground_true.append(xywh[0])       
+                if filter_type.upper() == "KF":
+                    # 如果找到了最大IOU BOX,则认为该框为观测值
+                    # 跟踪目标画成red框
+                    plot_one_box(target_box, frame, target=True)
+                    xywh = xyxy_to_xywh(target_box)
+                    jiance.append(xywh[0])       
+                    print(filter_type.upper()+ "jiance"+str(xywh[0]))
+                    box_center = (int((target_box[0] + target_box[2]) // 2), int((target_box[1] + target_box[3]) // 2))
+                    trace_list = updata_trace_list(box_center, trace_list, trace_list_len)
+                    # 框上方blue字
+                    cv2.putText(frame, filter_type.upper()+"IoU tracking", (int(target_box[0]), int(target_box[1] - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+                    # 计算dx,dy
+                    dx = xywh[0] - X_posterior[0]
+                    dy = xywh[1] - X_posterior[1]
+                    dw = xywh[2] - X_posterior[2]
+                    dh = xywh[3] - X_posterior[3]
+                    Z[0:4] = np.array([xywh]).T
+                    Z[4::] = np.array([dx, dy, dw, dh])
+                    # ground_true.append(Z[0])
+                elif filter_type.upper() == "EKF":
+                    # 如果找到了最大IOU BOX,则认为该框为观测值
+                    # 跟踪目标画成red框
+                    plot_one_box(target_box, frame, target=True)
+                    xywh = xyxy_to_xywh(target_box)
+                    jiance.append(xywh[0])
+                    print(filter_type.upper()+ "jiance"+str(xywh[0]))       
 
-                box_center = (int((target_box[0] + target_box[2]) // 2), int((target_box[1] + target_box[3]) // 2))
-                trace_list = updata_trace_list(box_center, trace_list, trace_list_len)
-                # 框上方blue字
-                cv2.putText(frame, "IoU tracking", (int(target_box[0]), int(target_box[1] - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
-                # 计算dx,dy
-                dx = xywh[0] - X_posterior[0]
-                dy = xywh[1] - X_posterior[1]
-                dw = xywh[2] - X_posterior[2]
-                dh = xywh[3] - X_posterior[3]
-                Z[0:4] = np.array([xywh]).T
-                Z[4::] = np.array([dx, dy, dw, dh])
-                # ground_true.append(Z[0])
+                    box_center = (int((target_box[0] + target_box[2]) // 2), int((target_box[1] + target_box[3]) // 2))
+                    trace_list = updata_trace_list(box_center, trace_list, trace_list_len)
+                    # 框上方blue字
+                    cv2.putText(frame, filter_type.upper()+"IoU tracking", (int(target_box[0]), int(target_box[1] - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+                    # 计算dx,dy
+                    dx = xywh[0] - X_posterior[0]
+                    dy = xywh[1] - X_posterior[1]
+                    # dw = xywh[2] - X_posterior[2]
+                    # dh = xywh[3] - X_posterior[3]
+                    ddx = dx - X_posterior[4]
+                    ddy = dy - X_posterior[5]
+                    Z[0:4] = np.array([xywh]).T
+                    Z[4::] = np.array([dx, dy, ddx, ddy])
+                    # ground_true.append(Z[0])
+ 
             f.close()              
 
         with open(label_ground_truth_path, "r") as f2:
-            content = f2.readlines()
+            content2 = f2.readlines()
             max_iou2 = IOU_Threshold
             max_iou_matched2 = False
             # ---------使用最大IOU来寻找观测值------------
             # 视觉检测算法
-            for j, data_ in enumerate(content): 
-                data = data_.replace('\n', "").split(" ") # 删除回车干扰，使用空格分隔
-                xyxy2 = np.array(data[1:5], dtype="float")
+            for j2, data2_ in enumerate(content2): 
+                data2 = data2_.replace('\n', "").split(" ") # 删除回车干扰，使用空格分隔
+                xyxy2 = np.array(data2[1:5], dtype="float")
                 # 与所有框与目标框的iou
                 iou2 = cal_iou(xyxy2, xywh_to_xyxy(X_posterior[0:4]))
                 if iou2 > max_iou2:# 筛出最大IOU及对应box
                     target_box2 = xyxy2
                     max_iou2 = iou 
-                    max_iou_matched2 = True
-
+                    max_iou_matched2 = True               
             if max_iou_matched2 == True:
-                xywh = xyxy_to_xywh(target_box2)
-                ground_true.append(xywh[0])       
+                xywh2 = xyxy_to_xywh(target_box2)
+                # plot_one_box(xyxy2, frame,color = (0,0,0))
+                ground_true.append(xywh2[0])
+                print("groundtruth:"+str(xywh2[0]))       
             f2.close()
 
-        if max_iou_matched == max_iou_matched2 == True :
+        if max_iou_matched == True and max_iou_matched2 == True :
             if filter_type.upper() == "KF":
                 # -----进行先验估计-----------------
                 X_prior = np.dot(A, X_posterior) # B=0
@@ -245,13 +277,14 @@ if __name__ == "__main__":
                 X_posterior = X_prior + np.dot(K, X_posterior_1)
                 box_posterior = xywh_to_xyxy(X_posterior[0:4])
                 estimations.append(X_posterior[0])
-
+                print("est:"+str(X_posterior[0])+"\n")
                 # plot_one_box(box_posterior, frame, color=(0, 0, 0), target=False)
                 # ---------更新状态估计协方差矩阵P-----
                 P_posterior_1 = np.eye(8) - np.dot(K, H)
                 P_posterior = np.dot(P_posterior_1, P_prior)  
             elif filter_type.upper() == "EKF":
-                dt = 30 / video_fps
+                # print("EKF tracking")
+                dt = 20 / video_fps
                 W = np.eye(8) #* Q_xishu
                 V = np.eye(8) #* R_xishu
                 A_ekf,X_prior = ekf_state_transition(X_posterior, dt)
@@ -266,6 +299,7 @@ if __name__ == "__main__":
                 X_posterior_1 = Z - Z1
                 X_posterior = X_prior + np.dot(K, X_posterior_1)
                 estimations.append(X_posterior[0])
+                print("est:"+str(X_posterior[0])+"\n")
                 P_posterior_1 = np.eye(8) - np.dot(K, H)
                 P_posterior = np.dot(P_posterior_1, P_prior)
             elif filter_type.upper() == "UKF":
@@ -277,6 +311,10 @@ if __name__ == "__main__":
                 # 此时直接迭代，不使用卡尔曼滤波
                 # X_posterior = np.dot(A, X_posterior)
                 X_posterior = np.dot(A_, X_posterior)
+                estimations.append(X_posterior[0])
+                print("FKjiance:null")
+                jiance.append(X_posterior[0])
+                print("est_loss:"+str(X_posterior[0])+"\n")
                 box_posterior = xywh_to_xyxy(X_posterior[0:4])
                 # plot_one_box(box_posterior, frame, color=(255, 255, 255), target=False)
                 box_center = ((int(box_posterior[0] + box_posterior[2]) // 2), int((box_posterior[1] + box_posterior[3]) // 2))
@@ -287,6 +325,10 @@ if __name__ == "__main__":
                 # 此时直接迭代，不使用卡尔曼滤波
                 # X_posterior = np.dot(A, X_posterior)
                 X_posterior = np.dot(A_, X_posterior)
+                estimations.append(X_posterior[0])
+                print("EFKjiance:null")
+                jiance.append(X_posterior[0])
+                print("est_loss:"+str(np.array(X_posterior[0]))+"\n")
                 box_posterior = xywh_to_xyxy(X_posterior[0:4])
                 # plot_one_box(box_posterior, frame, color=(255, 255, 255), target=False)
                 box_center = ((int(box_posterior[0] + box_posterior[2]) // 2), int((box_posterior[1] + box_posterior[3]) // 2))
@@ -298,6 +340,8 @@ if __name__ == "__main__":
         draw_trace(frame, trace_list)
         # rmse = cal_rmse(ground_true, estimations)
         moving_rmse = cal_moving_rmse(ground_true, estimations, rmse_win_len)
+        rmse_list.append(moving_rmse)
+
         cv2.putText(frame,"mov_rmse:"+str(moving_rmse),(25,25),cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         cv2.putText(frame, "ALL BOXES(Green)", (25, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 0), 2)
         cv2.putText(frame, "TRACKED BOX(Red)", (25, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
@@ -308,6 +352,24 @@ if __name__ == "__main__":
         frame_counter = frame_counter + 1
         if cv2.waitKey(10) & 0xFF == ord('q'):
             break
+        if frame_counter == 70:
+            break
+    
+    # y_label = np.array(rmse_list)
+    y_label = np.array(ground_true)
+    x_label = np.arange(len(y_label))
+    # plt.plot(x_label, y_label, marker = 'o')
+    plt.plot(x_label,np.array(ground_true),"r", label = "groundtrue")
+    plt.plot(x_label,np.array(estimations),"g", label = "estiations")
+    plt.plot(x_label,np.array(jiance),"b", label = "yolojiance")
+    plt.xlabel("time")
+    plt.ylabel(filter_type.upper()+"moving_rmse")
+    # plt.title("tracking rmse")
+    plt.title("tracking result")
+    plt.grid(True)
+    plt.legend()
+    plt.show()
+
     cap.release()
     cv2.destroyAllWindows()
 

@@ -135,7 +135,7 @@ def cal_moving_rmse(ground_truth, estimation, window_size=10):
         else:
             rmse = np.sqrt(np.mean((np.array(estimation) - np.array(ground_truth)) ** 2))
     else:
-        rmse = 10000
+        rmse = 0
     return rmse
 
 

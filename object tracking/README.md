@@ -20,6 +20,10 @@
 - v2.1
   - 将yolo模型检测结果作为检测值，调整mask rcnn检查结果为真值，方便rmse计算
   - 改进rmse计算方式，改为计算最近window_len长度数据的rmse，即moving_rmse
+- v2.2
+  - 增加图像显示
+  - 调整EKF状态方程建模，对部分初始值做出修改
+
 
 
 
