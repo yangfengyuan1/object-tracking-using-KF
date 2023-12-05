@@ -22,7 +22,14 @@
   - 改进rmse计算方式，改为计算最近window_len长度数据的rmse，即moving_rmse
 - v2.2
   - 增加图像显示
+  
   - 调整EKF状态方程建模，对部分初始值做出修改
+- v2.3
+  - 显示图像修改
+  - 评估方式从仅考虑x改为xywh的均值，即4个变量权重相同
+  - EFK状态向量修改到10维，调整程序初试化代码
+  - 文件夹新增不同方式输出结果
+
 
 
 
@@ -44,6 +51,8 @@ python ./main ./data/output.avi --filter EKF
 ​	output.avi
 
 ​	maskrcnn模型
+
+​	mask_rcnn_coco.h5
 
 ​	yolo v7模型
 

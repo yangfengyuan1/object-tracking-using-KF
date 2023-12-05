@@ -1,14 +1,3 @@
-# 单目标跟踪
-# 检测器获得检测框，全程只赋予1个ID，有两个相同的东西进来时，不会丢失唯一跟踪目标
-# 检测器的检测框为测量值
-# 目标的状态X = [x,y,h,w,delta_x,delta_y],中心坐标，宽高，中心坐标速度
-# 观测值
-# 如何寻找目标的观测值
-# 观测到的是N个框
-# 怎么找到目标的观测值
-# t时刻的框与t-1后验估计时刻IOU最大的框的那个作为观测值（存在误差，交叉情况下观测值会有误差）
-# 所以需要使用先验估计值进行融合
-
 import os
 # import sys
 import cv2
@@ -18,21 +7,19 @@ import matplotlib.pyplot as plt
 from utils import *
 
 # 状态初始化
-initial_target_box = [555, 631, 791, 715] # output.avi
+# initial_target_box = [555, 631, 791, 715] # output.avi
 # initial_target_box = [64, 521, 340, 695]  # 目标初始bouding box
-# initial_target_box = [193 ,342 ,250 ,474] # videotest1
+initial_target_box = [193 ,342 ,250 ,474] # videotest1
 # initial_target_box = [328 ,145 ,350 ,220]
 IOU_Threshold = 0.3 # 匹配时的阈值
 trace_list_len = 100 # 跟踪列表保留的轨迹
 Q_xishu = 0.02 # 调整过程噪声协方差数乘矩阵系数
 R_xishu = 1 # 调整观测噪声协方差数乘矩阵系数，R>>Q
 SAVE_VIDEO = True
-rmse_win_len = 5
+rmse_win_len = 10
 
 
 initial_box_state = xyxy_to_xywh(initial_target_box) # xyxy->xywh
-# [中心x,中心y,宽w,高h,dx,dy,dw,dh] ,initial dx=dy=0
-initial_state = np.array([[initial_box_state[0], initial_box_state[1], initial_box_state[2], initial_box_state[3], 0, 0, 0, 0]]).T  
 ground_true = [] # maskrcnn
 estimations = [] # filter
 jiance = []      # yolo
@@ -75,35 +62,38 @@ R = np.eye(8) * R_xishu
 P = np.eye(8)
 
 # 假设状态转移函数为非线性函数
-# EKF状态转移矩阵,状态向量x=[x,y,w,h,dx,dy,ddx,ddy]T
+# EKF状态转移矩阵,状态向量x=[x,y,w,h,dx,dy,dw,dh,ddx,ddy]T
 def ekf_state_transition(X, dt):
     ddt = 0.5 * dt * dt
-    A_ekf = np.array([[1, 0, 0, 0, dt, 0, ddt, 0],
-                      [0, 1, 0, 0, 0, dt, 0, ddt],
-                      [0, 0, 1, 0, 0, 0, dt, 0],
-                      [0, 0, 0, 1, 0, 0, 0, dt],
-                      [0, 0, 0, 0, 1, 0, 0, 0],
-                      [0, 0, 0, 0, 0, 1, 0, 0],
-                      [0, 0, 0, 0, 0, 0, 1, 0],
-                      [0, 0, 0, 0, 0, 0, 0, 1]])
+    A_ekf = np.array([[1, 0, 0, 0, dt, 0, 0, 0, ddt, 0],
+                      [0, 1, 0, 0, 0, dt, 0, 0, 0, ddt],
+                      [0, 0, 1, 0, 0, 0, dt, 0, 0, 0],
+                      [0, 0, 0, 1, 0, 0, 0, dt, 0, 0],
+                      [0, 0, 0, 0, 1, 0, 0, 0, dt, 0],
+                      [0, 0, 0, 0, 0, 1, 0, 0, 0, dt],
+                      [0, 0, 0, 0, 0, 0, 1, 0, 0, 0],
+                      [0, 0, 0, 0, 0, 0, 0, 1, 0, 0],
+                      [0, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+                      [0, 0, 0, 0, 0, 0, 0, 0, 0, 1]])
     return A_ekf,np.dot(A_ekf, X)
 
 # 计算状态向量X关于观测的雅可比矩阵H
 def calculate_jacobian(X):
     # 提取状态向量中的位置和大小信息
-    x, y, w, h, dx, dy, ddx, ddy = X
+    x, y, w, h, dx, dy, dw, dh, ddx, ddy = X
 
     # 计算雅可比矩阵H
     H = np.array([
-        [1, 0, 0, 0, 0, 0, 0, 0],  # 对x的偏导数
-        [0, 1, 0, 0, 0, 0, 0, 0],  # 对y的偏导数
-        [0, 0, 1, 0, 0, 0, 0, 0],  # 对w的偏导数
-        [0, 0, 0, 1, 0, 0, 0, 0],  # 对h的偏导数
-        [0, 0, 0, 0, 0, 0, 0, 0],  
-        [0, 0, 0, 0, 0, 0, 0, 0],  
-        [0, 0, 0, 0, 0, 0, 0, 0],  
-        [0, 0, 0, 0, 0, 0, 0, 0],  
-    ])
+        [1, 0, 0, 0, 0, 0, 0, 0, 0, 0],  # 对x的偏导数
+        [0, 1, 0, 0, 0, 0, 0, 0, 0, 0],  # 对y的偏导数
+        [0, 0, 1, 0, 0, 0, 0, 0, 0, 0],  # 对w的偏导数
+        [0, 0, 0, 1, 0, 0, 0, 0, 0, 0],  # 对h的偏导数
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],  
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],  
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],  
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],  
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] ])
     # H = np.eye(8)
     return H
 
@@ -119,6 +109,31 @@ if __name__ == "__main__":
     args = parser.parse_args()
     source = args.source
     filter_type = args.filter
+    # [中心x,中心y,宽w,高h,dx,dy,dw,dh] ,initial dx=dy=0
+    if filter_type.upper() == "KF":
+        initial_state = np.array([[initial_box_state[0], initial_box_state[1], initial_box_state[2], initial_box_state[3], 0, 0, 0, 0]]).T  
+    elif filter_type.upper() == "EKF":
+        initial_state = np.array([[initial_box_state[0], initial_box_state[1], initial_box_state[2], initial_box_state[3], 0, 0, 0, 0, 0, 0]]).T  
+        # 过程噪声协方差矩阵Q，p(w)~N(0,Q)，噪声来自真实世界中的不确定性,
+        # 在跟踪任务当中，过程噪声来自于目标移动的不确定性（突然加速、减速、转弯等）
+        Q = np.eye(10) * Q_xishu
+        # 观测噪声协方差矩阵R，p(v)~N(0,R)
+        # 观测噪声来自于检测框丢失、重叠等
+        R = np.eye(10) * R_xishu
+        # 状态估计协方差矩阵P初始化
+        P = np.eye(10)
+        # 观测值丢失时使用的状态转移矩阵
+        A_ = np.array([[1, 0, 0, 0, 1, 0, 0, 0, 0, 0],
+                       [0, 1, 0, 0, 0, 1, 0, 0, 0, 0],
+                       [0, 0, 1, 0, 0, 0, 0, 0, 0, 0],
+                       [0, 0, 0, 1, 0, 0, 0, 0, 0, 0],
+                       [0, 0, 0, 0, 1, 0, 0, 0, 0, 0],
+                       [0, 0, 0, 0, 0, 1, 0, 0, 0, 0],
+                       [0, 0, 0, 0, 0, 0, 1, 0, 0, 0],
+                       [0, 0, 0, 0, 0, 0, 0, 1, 0, 0],
+                       [0, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+                       [0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+                       ])
     if not os.path.exists(source):
         print('Error: Source VIDEO path does not exist.')
         exit(1)
@@ -163,15 +178,14 @@ if __name__ == "__main__":
         # Capture frame-by-frame
         ret, frame = cap.read()
         last_box_posterior = xywh_to_xyxy(X_posterior[0:4])
-        # ground_true.append()
         # 白色框；将指定物体对应框设为初始上一帧最好估计
         plot_one_box(last_box_posterior, frame, color=(255, 255, 255), target=False)
         if not ret:
             break
         print("frame num:"+str(frame_counter))        
         # 从视觉算法检测结果获取2d bbox信息,yolo结果为检测值，maskrcnn结果为groundtruth
-        label_file_path = os.path.join(label_path, file_name + "yolo_" + str(frame_counter) + ".txt")
-        label_ground_truth_path = os.path.join(label_path, file_name + "_" + str(frame_counter) + ".txt")
+        label_file_path = os.path.join(label_path, file_name + "_" + str(frame_counter) + ".txt")
+        label_ground_truth_path = os.path.join(label_path, file_name + "yolo_" + str(frame_counter) + ".txt")
         with open(label_file_path, "r") as f:
             content = f.readlines()
             max_iou = IOU_Threshold
@@ -196,8 +210,8 @@ if __name__ == "__main__":
                     # 跟踪目标画成red框
                     plot_one_box(target_box, frame, target=True)
                     xywh = xyxy_to_xywh(target_box)
-                    jiance.append(xywh[0])       
-                    print(filter_type.upper()+ "jiance"+str(xywh[0]))
+                    jiance.append(0.25*(xywh[0]+xywh[1]+xywh[2]+xywh[3]))       
+                    print(filter_type.upper()+ "jiance"+str(0.25*(xywh[0]+xywh[1]+xywh[2]+xywh[3])))
                     box_center = (int((target_box[0] + target_box[2]) // 2), int((target_box[1] + target_box[3]) // 2))
                     trace_list = updata_trace_list(box_center, trace_list, trace_list_len)
                     # 框上方blue字
@@ -209,14 +223,14 @@ if __name__ == "__main__":
                     dh = xywh[3] - X_posterior[3]
                     Z[0:4] = np.array([xywh]).T
                     Z[4::] = np.array([dx, dy, dw, dh])
-                    # ground_true.append(Z[0])
+                    
                 elif filter_type.upper() == "EKF":
                     # 如果找到了最大IOU BOX,则认为该框为观测值
                     # 跟踪目标画成red框
                     plot_one_box(target_box, frame, target=True)
                     xywh = xyxy_to_xywh(target_box)
-                    jiance.append(xywh[0])
-                    print(filter_type.upper()+ "jiance"+str(xywh[0]))       
+                    jiance.append(0.25*(xywh[0]+xywh[1]+xywh[2]+xywh[3]))
+                    print(filter_type.upper()+ "jiance"+str(0.25*(xywh[0]+xywh[1]+xywh[2]+xywh[3])))       
 
                     box_center = (int((target_box[0] + target_box[2]) // 2), int((target_box[1] + target_box[3]) // 2))
                     trace_list = updata_trace_list(box_center, trace_list, trace_list_len)
@@ -225,13 +239,14 @@ if __name__ == "__main__":
                     # 计算dx,dy
                     dx = xywh[0] - X_posterior[0]
                     dy = xywh[1] - X_posterior[1]
-                    # dw = xywh[2] - X_posterior[2]
-                    # dh = xywh[3] - X_posterior[3]
+                    dw = xywh[2] - X_posterior[2]
+                    dh = xywh[3] - X_posterior[3]
                     ddx = dx - X_posterior[4]
                     ddy = dy - X_posterior[5]
                     Z[0:4] = np.array([xywh]).T
-                    Z[4::] = np.array([dx, dy, ddx, ddy])
-                    # ground_true.append(Z[0])
+                    Z[4::] = np.array([dx, dy, dw, dh, ddx, ddy])
+                    # Z[4:] = np.concatenate([dx, dy, dw, dh, ddx, ddy])
+                    
  
             f.close()              
 
@@ -253,8 +268,8 @@ if __name__ == "__main__":
             if max_iou_matched2 == True:
                 xywh2 = xyxy_to_xywh(target_box2)
                 # plot_one_box(xyxy2, frame,color = (0,0,0))
-                ground_true.append(xywh2[0])
-                print("groundtruth:"+str(xywh2[0]))       
+                ground_true.append(0.25*(xywh2[0]+xywh2[1]+xywh2[2]+xywh2[3]))
+                print("groundtruth:"+str(0.25*(xywh2[0]+xywh2[1]+xywh2[2]+xywh2[3])))       
             f2.close()
 
         if max_iou_matched == True and max_iou_matched2 == True :
@@ -276,17 +291,17 @@ if __name__ == "__main__":
                 X_posterior_1 = Z - Z1
                 X_posterior = X_prior + np.dot(K, X_posterior_1)
                 box_posterior = xywh_to_xyxy(X_posterior[0:4])
-                estimations.append(X_posterior[0])
-                print("est:"+str(X_posterior[0])+"\n")
+                estimations.append(0.25*(X_posterior[0]+X_posterior[1]+X_posterior[2]+X_posterior[3]))
+                print("est:"+str(0.25*(X_posterior[0]+X_posterior[1]+X_posterior[2]+X_posterior[3]))+"\n")
                 # plot_one_box(box_posterior, frame, color=(0, 0, 0), target=False)
                 # ---------更新状态估计协方差矩阵P-----
                 P_posterior_1 = np.eye(8) - np.dot(K, H)
                 P_posterior = np.dot(P_posterior_1, P_prior)  
             elif filter_type.upper() == "EKF":
                 # print("EKF tracking")
-                dt = 20 / video_fps
-                W = np.eye(8) #* Q_xishu
-                V = np.eye(8) #* R_xishu
+                dt = 30 / video_fps
+                W = np.eye(10) #* Q_xishu
+                V = np.eye(10) #* R_xishu
                 A_ekf,X_prior = ekf_state_transition(X_posterior, dt)
                 P_prior_1 = np.dot(A_ekf, P_posterior)
                 P_prior = np.dot(P_prior_1, A_ekf.T) + np.dot(np.dot(W,Q),W.T) # W=I
@@ -298,9 +313,9 @@ if __name__ == "__main__":
                 
                 X_posterior_1 = Z - Z1
                 X_posterior = X_prior + np.dot(K, X_posterior_1)
-                estimations.append(X_posterior[0])
-                print("est:"+str(X_posterior[0])+"\n")
-                P_posterior_1 = np.eye(8) - np.dot(K, H)
+                estimations.append(0.25*(X_posterior[0]+X_posterior[1]+X_posterior[2]+X_posterior[3]))
+                print("est:"+str(0.25*(X_posterior[0]+X_posterior[1]+X_posterior[2]+X_posterior[3]))+"\n")
+                P_posterior_1 = np.eye(10) - np.dot(K, H)
                 P_posterior = np.dot(P_posterior_1, P_prior)
             elif filter_type.upper() == "UKF":
                 pass
@@ -311,10 +326,10 @@ if __name__ == "__main__":
                 # 此时直接迭代，不使用卡尔曼滤波
                 # X_posterior = np.dot(A, X_posterior)
                 X_posterior = np.dot(A_, X_posterior)
-                estimations.append(X_posterior[0])
-                print("FKjiance:null")
-                jiance.append(X_posterior[0])
-                print("est_loss:"+str(X_posterior[0])+"\n")
+                estimations.append(0.25*(X_posterior[0]+X_posterior[1]+X_posterior[2]+X_posterior[3]))
+                print(filter_type.upper()+"jiance:null")
+                jiance.append(0.25*(X_posterior[0]+X_posterior[1]+X_posterior[2]+X_posterior[3]))
+                print("est_loss:"+str(0.25*(X_posterior[0]+X_posterior[1]+X_posterior[2]+X_posterior[3]))+"\n")
                 box_posterior = xywh_to_xyxy(X_posterior[0:4])
                 # plot_one_box(box_posterior, frame, color=(255, 255, 255), target=False)
                 box_center = ((int(box_posterior[0] + box_posterior[2]) // 2), int((box_posterior[1] + box_posterior[3]) // 2))
@@ -325,10 +340,10 @@ if __name__ == "__main__":
                 # 此时直接迭代，不使用卡尔曼滤波
                 # X_posterior = np.dot(A, X_posterior)
                 X_posterior = np.dot(A_, X_posterior)
-                estimations.append(X_posterior[0])
-                print("EFKjiance:null")
-                jiance.append(X_posterior[0])
-                print("est_loss:"+str(np.array(X_posterior[0]))+"\n")
+                estimations.append(0.25*(X_posterior[0]+X_posterior[1]+X_posterior[2]+X_posterior[3]))
+                print(filter_type.upper()+"jiance:null")
+                jiance.append(0.25*(X_posterior[0]+X_posterior[1]+X_posterior[2]+X_posterior[3]))
+                print("est_loss:"+str(np.array(0.25*(X_posterior[0]+X_posterior[1]+X_posterior[2]+X_posterior[3])))+"\n")
                 box_posterior = xywh_to_xyxy(X_posterior[0:4])
                 # plot_one_box(box_posterior, frame, color=(255, 255, 255), target=False)
                 box_center = ((int(box_posterior[0] + box_posterior[2]) // 2), int((box_posterior[1] + box_posterior[3]) // 2))
@@ -352,22 +367,30 @@ if __name__ == "__main__":
         frame_counter = frame_counter + 1
         if cv2.waitKey(10) & 0xFF == ord('q'):
             break
-        if frame_counter == 70:
+        if frame_counter == 100:
             break
     
-    # y_label = np.array(rmse_list)
-    y_label = np.array(ground_true)
+    plt.subplot(1, 2, 1)
+    y_label = np.array(estimations)
     x_label = np.arange(len(y_label))
-    # plt.plot(x_label, y_label, marker = 'o')
     plt.plot(x_label,np.array(ground_true),"r", label = "groundtrue")
     plt.plot(x_label,np.array(estimations),"g", label = "estiations")
     plt.plot(x_label,np.array(jiance),"b", label = "yolojiance")
     plt.xlabel("time")
-    plt.ylabel(filter_type.upper()+"moving_rmse")
-    # plt.title("tracking rmse")
+    plt.ylabel(filter_type.upper()+"position")
     plt.title("tracking result")
-    plt.grid(True)
     plt.legend()
+    plt.grid(True)
+
+    plt.subplot(1, 2, 2)
+    y_label1 = np.array(rmse_list)
+    x_label1 = np.arange(len(y_label1))
+    plt.plot(x_label1, y_label1, marker = "o", color = "y", label = "mov_rmse")
+    plt.title("tracking rmse")
+    plt.legend()
+    plt.grid(True)
+
+    plt.tight_layout()
     plt.show()
 
     cap.release()
